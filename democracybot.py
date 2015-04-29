@@ -11,15 +11,6 @@
 ### usage
 # ./democracybot.py  -n democracy-bot -r 'lafamille@conference.babare.dynamic-dns.net' -j 'babar-bot@babare.dynamic-dns.net' -p password
 
-REFERENDUM_RX = u'^r[é|e]f[é|e]rendum\s+[!|.]+'
-YES_RX = r'o+u+i+\s*[!|.]*$'
-NO_RX = r'n+o+n+\s*[!|.]*$'
-BLANK_RX = r'b+l+a+n+c+\s*[!|.]*$'
-RESULTAT_RX = u'r[é|e]sultat\s*[!|.]*'
-QUESTION_RX = u'question\s*[!|.]*'
-
-VOTE_DURATION = 60
-
 import sys
 import logging
 import getpass
@@ -29,6 +20,8 @@ import sleekxmpp
 import math
 import threading
 from datetime import datetime
+
+from ReferendumActivity import ReferendumActivity
 
 if sys.version_info < (3, 0):
     from sleekxmpp.util.misc_ops import setdefaultencoding
@@ -45,12 +38,10 @@ class MUCBot(sleekxmpp.ClientXMPP):
         self.nick = nick
         self.add_event_handler("session_start", self.start)
         self.add_event_handler("groupchat_message", self.muc_message)
-        self.referendumStarted = False
-        self.questionAsked = False
-        self.referendumOwner = None
-        self.referendumOwnerNick = None
-        self.question = ''
-        self.votingUrn = dict()
+        self.add_event_handler("message", self.private_message)
+		
+        self.referendumActivity = ReferendumActivity(self)
+        self.activities = [self.referendumActivity]
 
     def start(self, event):
         self.get_roster()
@@ -60,107 +51,22 @@ class MUCBot(sleekxmpp.ClientXMPP):
                                         # If a room password is needed, use:
                                         # password=the_room_password,
                                         wait=True)
-    def startTimer(self):
-        threading.Timer(VOTE_DURATION, self.timerEnd).start() 
-        
-    def timerEnd(self):
-        print "timerEnd"
-        self.sendMucMessage("Le vote est maintenant terminé.");
-        self.sendMucMessage("La question était : \"" + self.question + "\"");
-        self.sendResult()
-        self.referendumStarted = False
-        self.questionAsked = False
-        self.votingUrn.clear()
 	
     def sendMucMessage(self, msgStr):
         self.send_message(mto=self.room, mbody=msgStr, mtype='groupchat') 
+    
+    def getRealJidForMucnick(self, mucnick):
+        return self.plugin['xep_0045'].getJidProperty(self.room, mucnick, 'jid')
+           
+    def private_message(self, msg):
+        if msg['mucnick'] != self.nick: 
+            for activity in self.activities:
+                activity.private_message(msg)
         
-                  
-    def sendResult(self):
-        yesCount = sum( vote == 'yes' for vote in self.votingUrn.values() )
-        noCount = sum( vote == 'no' for vote in self.votingUrn.values() )
-        blankCount = sum( vote == 'blank' for vote in self.votingUrn.values() )
-        self.sendMucMessage("Il y a " + str(yesCount) + " oui, " + str(noCount) + " non et " + str(blankCount) + " blancs.")
-		
-        numberOfVotes = len(self.votingUrn.keys())
-
-        if (numberOfVotes > 0):
-            yesPercentage = round(100 * yesCount / numberOfVotes)
-            noPercentage = round(100 * noCount / numberOfVotes)
-            blankPercentage = round(100 * blankCount / numberOfVotes)
-            self.sendMucMessage("Les scores sont de " + str(yesPercentage) + "% pour le oui, " + str(noPercentage) + "% pour le non et " + str(blankPercentage) + "% de vote blancs.")
-
-            winner = None                    
-            if (yesPercentage > noPercentage and yesPercentage > blankPercentage):
-                winner = 'Oui'
-                winnerString = "Le oui l'emporte"
-                winnerCount = yesCount
-            elif (noPercentage > yesPercentage and noPercentage > blankPercentage):
-                winner = 'no'
-                winnerString = "Le non l'emporte"
-                winnerCount = noCount
-            elif (blankPercentage > yesPercentage and blankPercentage > noPercentage):
-                winner = 'blank'
-                winnerString = "Le blanc l'emporte"
-                winnerCount = blankCount
-
-            if winner != None:
-                self.sendMucMessage(winnerString)                   
-                if (winnerCount >= math.ceil(numberOfVotes/2) + 1):
-                    self.sendMucMessage("La majorité absolue est atteinte.")
-                else:
-                    self.sendMucMessage("La majorité absolue n'est pas atteinte.") 
-            else:
-                self.sendMucMessage("Egalité.")
-        else:
-            self.sendMucMessage("Pas de votes.")
-                              
     def muc_message(self, msg):
-        if msg['mucnick'] != self.nick:
-            if not self.referendumStarted:
-                if re.search(REFERENDUM_RX, msg['body'].decode('utf8'), re.IGNORECASE | re.UNICODE):             
-                    self.referendumOwner = self.plugin['xep_0045'].getJidProperty(self.room, msg['mucnick'], 'jid').bare
-                    self.referendumOwnerNick = msg['mucnick']
-                    self.referendumStarted = True
-                    self.mto = msg['from'].bare
-                    print "Referendum started by " + self.referendumOwner
-                    self.sendMucMessage(self.referendumOwnerNick + ", pose une question.")
-                                      
-            elif self.referendumStarted and not self.questionAsked:
-                if self.plugin['xep_0045'].getJidProperty(self.room, msg['mucnick'], 'jid').bare == self.referendumOwner:
-                    self.sendMucMessage("Vous pouvez maintenant voter pendant " + str(VOTE_DURATION) + " secondes. Oui ou non.")
-                    self.question = msg['body']
-                    self.questionAsked = True
-                    self.startTimer()
-                    
-            elif self.referendumStarted and self.questionAsked:
-                command = None
-                
-                #Vote
-                if re.search(YES_RX, msg['body'].decode('utf8'), re.IGNORECASE | re.UNICODE):
-                    command = 'yes'
-                if re.search(NO_RX, msg['body'].decode('utf8'), re.IGNORECASE | re.UNICODE):
-                    command = 'no'
-                if re.search(BLANK_RX, msg['body'].decode('utf8'), re.IGNORECASE | re.UNICODE):
-                    command = 'blank'
-
-                if command != None:
-                    self.send_message(mto=msg['from'], mbody="Vote de " + self.plugin['xep_0045'].getJidProperty(self.room, msg['mucnick'], 'jid').bare + " enregistré.", mtype='chat') 
-                    #self.sendMucMessage()
-                    self.votingUrn[self.plugin['xep_0045'].getJidProperty(self.room, msg['mucnick'], 'jid').bare] = command
-                
-                #Autres commandes
-                if re.search(QUESTION_RX, msg['body'].decode('utf8'), re.IGNORECASE | re.UNICODE):
-                    self.sendMucMessage(self.question)
-                
-                if re.search(RESULTAT_RX, msg['body'].decode('utf8'), re.IGNORECASE | re.UNICODE):
-                    self.sendResult()
-                                          
-                    
-                        
-                    
-            
-                    
+        if msg['mucnick'] != self.nick: 
+            for activity in self.activities:
+                activity.muc_message(msg)
 
 if __name__ == '__main__':
     # Setup the command line arguments.
